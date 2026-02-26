@@ -1,0 +1,103 @@
+name: default
+description: "Standard document processing workflow"
+version: 1
+
+sla:
+  deadline_seconds: 60
+  warn_threshold_pct: 70
+  escalation_threshold_pct: 90
+
+stages:
+  - name: split
+    component: splitter
+    routing_key: request.split
+    timeout_seconds: 10
+
+  - name: ocr
+    component: ocr
+    routing_key: page.ocr
+    timeout_seconds: 15
+    parallel: true
+
+  - name: classify
+    component: classifier
+    routing_key: page.classify
+    timeout_seconds: 10
+    parallel: true
+    confidence_threshold: 0.80
+    backoffice_queue: task.classification
+
+  - name: classification_aggregation
+    component: classification_aggregator
+    routing_key: page.classified
+    aggregation:
+      type: fan_in
+      collect_by: request_id
+      expect_count_from: page_count
+
+  - name: extract
+    component: extractor
+    routing_key: doc.extract
+    timeout_seconds: 15
+    parallel: true
+    confidence_threshold: 0.75
+    backoffice_queue: task.extraction
+
+  - name: extraction_aggregation
+    component: extraction_aggregator
+    routing_key: doc.extracted
+    aggregation:
+      type: fan_in
+      collect_by: request_id
+      expect_count_from: document_count
+
+  - name: consolidate
+    component: consolidator
+    routing_key: request.consolidate
+    timeout_seconds: 5
+
+extraction_schemas:
+  invoice:
+    fields:
+      - name: invoice_number
+        type: string
+        required: true
+      - name: total_amount
+        type: decimal
+        required: true
+      - name: vendor_name
+        type: string
+      - name: date
+        type: date
+  receipt:
+    fields:
+      - name: merchant
+        type: string
+      - name: total
+        type: decimal
+      - name: date
+        type: date
+  id_card:
+    fields:
+      - name: full_name
+        type: string
+        required: true
+      - name: id_number
+        type: string
+        required: true
+      - name: date_of_birth
+        type: date
+  payslip:
+    fields:
+      - name: company_name
+        type: string
+        required: true
+      - name: employee_name
+        type: string
+        required: true
+      - name: gross_amount
+        type: decimal
+      - name: net_amount
+        type: decimal
+      - name: period
+        type: string

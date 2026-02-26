@@ -1,0 +1,208 @@
+services:
+  # --- Infrastructure ---
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: docproc
+      POSTGRES_PASSWORD: docproc
+      POSTGRES_DB: docproc
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docproc"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # --- API Gateway (FastAPI HTTP server) ---
+  api-gateway:
+    build: .
+    command: uvicorn src.components.api_gateway.app:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_STORAGE_PATH: /data/storage
+    volumes:
+      - file_storage:/data/storage
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # --- Pipeline Components ---
+  workflow-router:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: workflow_router
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+      DOCPROC_WORKFLOWS_DIR: config/workflows
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  splitter:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: splitter
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+      DOCPROC_STORAGE_PATH: /data/storage
+    volumes:
+      - file_storage:/data/storage
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  ocr:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: ocr
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+      DOCPROC_STORAGE_PATH: /data/storage
+    volumes:
+      - file_storage:/data/storage
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  classifier:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: classifier
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  classification-aggregator:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: classification_aggregator
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  extractor:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: extractor
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  extraction-aggregator:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: extraction_aggregator
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  consolidator:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: consolidator
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  sla-monitor:
+    build: .
+    command: python -m src
+    environment:
+      DOCPROC_COMPONENT_NAME: sla_monitor
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_HEALTH_PORT: 8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # --- Back Office ---
+  backoffice:
+    build: .
+    command: uvicorn src.components.backoffice.app:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    environment:
+      DOCPROC_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DOCPROC_DATABASE_URL: postgresql+asyncpg://docproc:docproc@postgres:5432/docproc
+      DOCPROC_STORAGE_PATH: /data/storage
+    volumes:
+      - file_storage:/data/storage
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  rabbitmq_data:
+  postgres_data:
+  file_storage:

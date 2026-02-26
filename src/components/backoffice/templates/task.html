@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tarea {{ task.id | string | truncate(8, True, '') }} - DocProc Back Office</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #333; }
+        .header { background: #1a1a2e; color: white; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 1.4rem; }
+        .header a { color: #aaa; text-decoration: none; }
+        .header a:hover { color: white; }
+        .container { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+        .card { background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 1.5rem; margin-bottom: 1.5rem; }
+        .card h2 { margin-bottom: 1rem; font-size: 1.2rem; color: #1a1a2e; }
+        .field { margin-bottom: 1rem; }
+        .field label { display: block; font-weight: 600; margin-bottom: 0.25rem; font-size: 0.85rem; color: #666; }
+        .field .value { padding: 0.5rem; background: #f8f9fa; border-radius: 4px; font-family: monospace; white-space: pre-wrap; }
+        .ocr-text { max-height: 300px; overflow-y: auto; padding: 1rem; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap; }
+        select, input, textarea { width: 100%; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.95rem; }
+        textarea { min-height: 150px; font-family: monospace; }
+        .btn { padding: 0.6rem 1.2rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.95rem; text-decoration: none; }
+        .btn-primary { background: #1a1a2e; color: white; }
+        .btn-primary:hover { background: #16213e; }
+        .btn-secondary { background: #e9ecef; color: #333; }
+        .actions { display: flex; gap: 1rem; margin-top: 1.5rem; }
+        .badge { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem; font-weight: 500; }
+        .badge-classification { background: #d4edda; color: #155724; }
+        .badge-extraction { background: #e2d5f1; color: #4a235a; }
+        .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Tarea: {{ task.id | string | truncate(8, True, '') }}</h1>
+        <a href="/?operator={{ operator }}">&larr; Volver al dashboard</a>
+    </div>
+    <div class="container">
+        <!-- Task Info -->
+        <div class="card">
+            <h2>Informacion de la tarea</h2>
+            <div class="meta-grid">
+                <div class="field">
+                    <label>Tipo</label>
+                    <div class="value"><span class="badge badge-{{ task.task_type }}">{{ task.task_type }}</span></div>
+                </div>
+                <div class="field">
+                    <label>Prioridad</label>
+                    <div class="value">{{ task.priority }}</div>
+                </div>
+                <div class="field">
+                    <label>Request ID</label>
+                    <div class="value">{{ task.request_id }}</div>
+                </div>
+                <div class="field">
+                    <label>Estado</label>
+                    <div class="value">{{ task.status }}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input Data -->
+        <div class="card">
+            <h2>Datos de entrada</h2>
+            {% if task.task_type == 'classification' %}
+                <div class="field">
+                    <label>Tipo sugerido (automatico)</label>
+                    <div class="value">{{ task.input_data.get('suggested_type', 'N/A') }} (confianza: {{ task.input_data.get('confidence', 'N/A') }})</div>
+                </div>
+                <div class="field">
+                    <label>Texto OCR</label>
+                    <div class="ocr-text">{{ task.input_data.get('ocr_text', 'Sin texto disponible') }}</div>
+                </div>
+            {% elif task.task_type == 'extraction' %}
+                <div class="field">
+                    <label>Tipo documental</label>
+                    <div class="value">{{ task.input_data.get('doc_type', 'N/A') }}</div>
+                </div>
+                <div class="field">
+                    <label>Datos extraidos (automatico)</label>
+                    <div class="ocr-text">{{ task.input_data.get('extracted_data', {}) | tojson(indent=2) }}</div>
+                </div>
+                <div class="field">
+                    <label>Textos OCR</label>
+                    <div class="ocr-text">{% for page_idx, text in (task.input_data.get('ocr_texts', {}) or {}).items() %}--- Pagina {{ page_idx }} ---
+{{ text }}
+
+{% endfor %}</div>
+                </div>
+            {% endif %}
+        </div>
+
+        <!-- Submit Form -->
+        <div class="card">
+            <h2>Correccion del operador</h2>
+            <form method="post" action="/tasks/{{ task.id }}/submit">
+                <input type="hidden" name="operator" value="{{ operator }}">
+
+                {% if task.task_type == 'classification' %}
+                    <div class="field">
+                        <label>Tipo documental correcto</label>
+                        <select name="doc_type">
+                            <option value="invoice" {{ 'selected' if task.input_data.get('suggested_type') == 'invoice' }}>Factura (invoice)</option>
+                            <option value="id_card" {{ 'selected' if task.input_data.get('suggested_type') == 'id_card' }}>DNI (id_card)</option>
+                            <option value="payslip" {{ 'selected' if task.input_data.get('suggested_type') == 'payslip' }}>Nomina (payslip)</option>
+                            <option value="receipt" {{ 'selected' if task.input_data.get('suggested_type') == 'receipt' }}>Recibo (receipt)</option>
+                            <option value="contract" {{ 'selected' if task.input_data.get('suggested_type') == 'contract' }}>Contrato (contract)</option>
+                        </select>
+                    </div>
+                    <input type="hidden" name="extracted_data" value="{}">
+
+                {% elif task.task_type == 'extraction' %}
+                    <input type="hidden" name="doc_type" value="">
+                    <div class="field">
+                        <label>Datos extraidos corregidos (JSON)</label>
+                        <textarea name="extracted_data">{{ task.input_data.get('extracted_data', {}) | tojson(indent=2) }}</textarea>
+                    </div>
+                {% endif %}
+
+                <div class="actions">
+                    <button type="submit" class="btn btn-primary">Enviar correccion</button>
+                    <a href="/?operator={{ operator }}" class="btn btn-secondary">Cancelar</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

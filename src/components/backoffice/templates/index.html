@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocProc - Back Office</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #333; }
+        .header { background: #1a1a2e; color: white; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 1.4rem; }
+        .operator-badge { background: #16213e; padding: 0.5rem 1rem; border-radius: 4px; font-size: 0.9rem; }
+        .container { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        .stat-card { background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stat-card .number { font-size: 2rem; font-weight: bold; color: #1a1a2e; }
+        .stat-card .label { color: #666; font-size: 0.85rem; margin-top: 0.25rem; }
+        table { width: 100%; background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-collapse: collapse; }
+        th { background: #f8f9fa; text-align: left; padding: 0.75rem 1rem; font-size: 0.85rem; color: #666; text-transform: uppercase; border-bottom: 2px solid #e9ecef; }
+        td { padding: 0.75rem 1rem; border-bottom: 1px solid #f0f0f0; }
+        tr:hover { background: #f8f9fa; }
+        .badge { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem; font-weight: 500; }
+        .badge-pending { background: #fff3cd; color: #856404; }
+        .badge-assigned { background: #cce5ff; color: #004085; }
+        .badge-classification { background: #d4edda; color: #155724; }
+        .badge-extraction { background: #e2d5f1; color: #4a235a; }
+        .btn { padding: 0.4rem 0.8rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; text-decoration: none; }
+        .btn-primary { background: #1a1a2e; color: white; }
+        .btn-primary:hover { background: #16213e; }
+        .empty { text-align: center; padding: 3rem; color: #999; }
+        .refresh-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>DocProc Back Office</h1>
+        <div class="operator-badge">Operador: {{ operator }}</div>
+    </div>
+    <div class="container">
+        <div class="stats">
+            <div class="stat-card">
+                <div class="number">{{ tasks | selectattr('status', 'eq', 'pending') | list | length }}</div>
+                <div class="label">Tareas pendientes</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ tasks | selectattr('status', 'eq', 'assigned') | list | length }}</div>
+                <div class="label">Tareas asignadas</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ tasks | selectattr('task_type', 'eq', 'classification') | list | length }}</div>
+                <div class="label">Clasificaciones</div>
+            </div>
+            <div class="stat-card">
+                <div class="number">{{ tasks | selectattr('task_type', 'eq', 'extraction') | list | length }}</div>
+                <div class="label">Extracciones</div>
+            </div>
+        </div>
+
+        <div class="refresh-bar">
+            <h2>Cola de tareas</h2>
+            <a href="/?operator={{ operator }}" class="btn btn-primary">Refrescar</a>
+        </div>
+
+        {% if tasks %}
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Tipo</th>
+                    <th>Estado</th>
+                    <th>Prioridad</th>
+                    <th>Request</th>
+                    <th>Creada</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in tasks %}
+                <tr>
+                    <td>{{ task.id | string | truncate(8, True, '') }}</td>
+                    <td>
+                        <span class="badge badge-{{ task.task_type }}">{{ task.task_type }}</span>
+                    </td>
+                    <td>
+                        <span class="badge badge-{{ task.status }}">{{ task.status }}</span>
+                    </td>
+                    <td>{{ task.priority }}</td>
+                    <td>{{ task.request_id | string | truncate(8, True, '') }}</td>
+                    <td>{{ task.created_at.strftime('%H:%M:%S') if task.created_at else '-' }}</td>
+                    <td>
+                        {% if task.status == 'pending' %}
+                            <form method="post" action="/tasks/{{ task.id }}/claim" style="display:inline">
+                                <input type="hidden" name="operator" value="{{ operator }}">
+                                <button type="submit" class="btn btn-primary">Reclamar</button>
+                            </form>
+                        {% elif task.status == 'assigned' and task.assigned_to == operator %}
+                            <a href="/tasks/{{ task.id }}?operator={{ operator }}" class="btn btn-primary">Resolver</a>
+                        {% else %}
+                            <span style="color:#999">{{ task.assigned_to or '-' }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty">
+            <p>No hay tareas pendientes</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        // Auto-refresh every 10 seconds
+        setTimeout(() => location.reload(), 10000);
+    </script>
+</body>
+</html>
