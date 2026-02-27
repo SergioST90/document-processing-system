@@ -89,7 +89,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida** (a `q.extractor` via routing key `doc.extract`, M mensajes, uno por documento):
+**Salida** (M mensajes via `__next__` a la siguiente etapa del workflow, ej: `q.extractor` en el flujo default):
 ```json
 {
   "request_id": "uuid",

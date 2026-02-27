@@ -62,4 +62,4 @@ class ExtractionAggregatorComponent(BaseComponent):
                 "source_component": self.component_name,
             }
         )
-        return [("request.consolidate", out_message)]
+        return [("__next__", out_message)]

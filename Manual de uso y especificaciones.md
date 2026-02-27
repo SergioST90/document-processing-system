@@ -120,7 +120,7 @@ Python >= 3.11 como lenguaje principal, con todo el pipeline basado en `asyncio`
 
 Toda la comunicación entre componentes del pipeline se realiza mediante mensajes asíncronos a través de RabbitMQ. No hay llamadas directas entre servicios (salvo HTTP hacia el API Gateway y Back Office). Cada componente consume de una cola específica, procesa el mensaje, actualiza el estado en PostgreSQL y publica el resultado en la cola de la siguiente etapa.
 
-El envelope universal que viaja por todas las colas es el `PipelineMessage`, un modelo Pydantic que contiene: `request_id` (UUID del trabajo), `trace_id` (UUID de traza para observabilidad), `source_component` (nombre del componente que generó el mensaje), `routing_key` (siguiente destino), `payload` (datos específicos de la etapa), `page_index` (opcional, para mensajes de página individual), `document_id` (opcional, para mensajes de documento) y `metadata` (metadatos del cliente original).
+El envelope universal que viaja por todas las colas es el `PipelineMessage`, un modelo Pydantic que contiene: `request_id` (UUID del trabajo), `trace_id` (UUID de traza para observabilidad), `workflow_name` (nombre del workflow YAML), `current_stage` (etapa actual del workflow, usada para el enrutamiento dinámico), `source_component` (nombre del componente que generó el mensaje), `payload` (datos específicos de la etapa), `page_index` (opcional, para mensajes de página individual), `document_id` (opcional, para mensajes de documento) y `deadline_utc` (deadline del SLA).
 
 ---
 
@@ -132,7 +132,7 @@ El envelope universal que viaja por todas las colas es el `PipelineMessage`, un 
 
 El cliente envía un fichero junto con metadatos a través de `POST /process`. El API Gateway almacena el fichero en el directorio de storage, crea un registro en la tabla `requests` de PostgreSQL con estado `received` y publica un mensaje en la cola `q.workflow_router` del exchange `doc.direct`.
 
-El Workflow Router consume ese mensaje, lee los metadatos y el canal de entrada para determinar qué workflow YAML ejecutar. Carga la definición del flujo, calcula el deadline del SLA (`timestamp_entrada + sla_seconds`) y actualiza el registro del request con el deadline, el nombre del workflow y el estado `routing`. A continuación, publica el mensaje hacia la cola `q.splitter`.
+El Workflow Router consume ese mensaje, lee los metadatos y el canal de entrada para determinar qué workflow YAML ejecutar. Carga la definición del flujo, calcula el deadline del SLA (`timestamp_entrada + sla_seconds`) y actualiza el registro del request con el deadline, el nombre del workflow y el estado `routing`. A continuación, consulta el `WorkflowLoader` para obtener la primera etapa del workflow mediante `get_first_stage()` y publica el mensaje hacia la cola correspondiente (en el workflow default es `q.splitter`), estableciendo `current_stage` en el mensaje.
 
 **Punto crítico:** el SLA Timer arranca en este momento exacto. Con SLAs de 30 segundos, cada milisegundo cuenta desde la recepción.
 
@@ -142,7 +142,7 @@ El Workflow Router consume ese mensaje, lee los metadatos y el canal de entrada 
 
 El Splitter recibe el mensaje con la referencia al fichero, lo descompone en páginas individuales (cada página del PDF, TIFF, etc.) y genera un sub-trabajo por cada página. Actualiza la tabla `requests` con el `page_count` total y crea una fila en la tabla `pages` por cada página con estado `PENDIENTE_OCR`. También inicializa la tabla `aggregation_state` con `stage='classification'`, `expected_count=N` y `received_count=0`.
 
-Cada página se publica como un mensaje independiente en la cola `q.ocr`. Este es el primer punto de fan-out: si un fichero tiene 25 páginas, se generan 25 mensajes que N workers procesarán en paralelo.
+Cada página se publica como un mensaje independiente usando el sentinela `__next__`, que el framework resuelve dinámicamente consultando el workflow YAML (en el workflow default, la siguiente etapa es OCR con cola `q.ocr`). Este es el primer punto de fan-out: si un fichero tiene 25 páginas, se generan 25 mensajes que N workers procesarán en paralelo.
 
 El estado del request pasa a `splitting` y luego a `processing`.
 
@@ -150,7 +150,7 @@ El estado del request pasa a `splitting` y luego a `processing`.
 
 **Componente:** OCR
 
-Cada worker OCR consume un mensaje de la cola `q.ocr`, procesa una página individual para extraer el texto mediante reconocimiento óptico de caracteres y actualiza la fila correspondiente en la tabla `pages` con el texto extraído y la confianza del OCR. A continuación, publica el mensaje con el texto hacia la cola `q.classifier`.
+Cada worker OCR consume un mensaje de la cola `q.ocr`, procesa una página individual para extraer el texto mediante reconocimiento óptico de caracteres y actualiza la fila correspondiente en la tabla `pages` con el texto extraído y la confianza del OCR. A continuación, devuelve el sentinela `__next__` y el framework resuelve dinámicamente la siguiente etapa del workflow (en el workflow default, la cola `q.classifier`).
 
 **Estado actual (stub):** la implementación actual devuelve texto de ejemplo aleatorio simulando diferentes tipos documentales (factura, DNI, nómina). Para producción, se sustituye por un motor OCR real (Tesseract, Google Vision, AWS Textract, etc.) sin cambiar la arquitectura.
 
@@ -160,9 +160,9 @@ Cada worker OCR consume un mensaje de la cola `q.ocr`, procesa una página indiv
 
 El Classifier recibe el texto de cada página y determina su tipo documental (factura, DNI, nómina, contrato, etc.) junto con una puntuación de confianza. El umbral de confianza es configurable por flujo (por defecto 0.80, definido en `DOCPROC_CLASSIFICATION_CONFIDENCE_THRESHOLD` o en el YAML del workflow).
 
-Si la confianza es igual o superior al umbral, la página se marca como clasificada automáticamente y se publica hacia `q.classification_aggregator` con el routing key `page.classified`.
+Si la confianza es igual o superior al umbral, la página se marca como clasificada automáticamente y se devuelve el sentinela `__next__`, que el framework resuelve dinámicamente a la siguiente etapa del workflow (en el workflow default, `q.classification_aggregator` con routing key `page.classified`).
 
-Si la confianza es inferior al umbral, se crea una tarea en la tabla `backoffice_tasks` con `task_type='classification'` y se publica un mensaje en la cola `q.backoffice.classification` del exchange `doc.backoffice`. La página queda pendiente hasta que un operador la clasifique manualmente.
+Si la confianza es inferior al umbral, se crea una tarea en la tabla `backoffice_tasks` con `task_type='classification'`, `source_stage` (etapa actual) y `workflow_name`, y se devuelve el sentinela `__backoffice__`, que el framework resuelve consultando el `backoffice_queue` configurado en la etapa actual del YAML (por defecto `task.classification`, que va a la cola `q.backoffice.classification` del exchange `doc.backoffice`). La página queda pendiente hasta que un operador la clasifique manualmente.
 
 **Estado actual (stub):** clasificación por keywords en el texto OCR con confianza aleatoria entre 0.60 y 0.99. Para producción, se sustituye por un modelo ML real.
 
@@ -172,7 +172,7 @@ Si la confianza es inferior al umbral, se crea una tarea en la tabla `backoffice
 
 Cuando una página se deriva al Back Office por baja confianza en la clasificación, el operador accede al dashboard en `http://localhost:8001/?operator=nombre`, ve la tarea pendiente con la imagen de la página y el texto OCR extraído, reclama la tarea (que se reserva para él y desaparece para otros operadores), clasifica manualmente el tipo documental y envía la corrección.
 
-Al enviar, el Back Office actualiza la fila en `pages` con el tipo documental corregido, confianza 1.0 y origen `BACKOFFICE`, actualiza la tarea como `completed` y publica un mensaje hacia `q.classification_aggregator` con el routing key `page.classified`, reinyectando la página en el pipeline normal.
+Al enviar, el Back Office actualiza la fila en `pages` con el tipo documental corregido, confianza 1.0 y origen `BACKOFFICE`, actualiza la tarea como `completed` y reinyecta la página en el pipeline consultando dinámicamente el workflow YAML: lee `source_stage` y `workflow_name` de la tarea y usa `WorkflowLoader.get_next_stage()` para determinar la siguiente etapa (en el workflow default, `q.classification_aggregator` con routing key `page.classified`).
 
 ### 3.6 Etapa 4 — Agrupación de Páginas en Documentos (Fan-In)
 
@@ -191,7 +191,7 @@ PostgreSQL garantiza atomicidad a nivel de fila. Si 5 páginas terminan simultá
 
 La agrupación consiste en ordenar las páginas clasificadas por su `page_index` y agrupar páginas consecutivas del mismo tipo documental en un mismo documento lógico. Por ejemplo, si las páginas 1-2 son DNI y las páginas 3-5 son Factura, se crean dos documentos lógicos.
 
-El Aggregator crea filas en la tabla `documents`, actualiza `requests.document_count`, inicializa un nuevo registro en `aggregation_state` con `stage='extraction'` y `expected_count=M` (número de documentos), y publica un mensaje por cada documento hacia `q.extractor`. Este es el segundo fan-out.
+El Aggregator crea filas en la tabla `documents`, actualiza `requests.document_count`, inicializa un nuevo registro en `aggregation_state` con `stage='extraction'` y `expected_count=M` (número de documentos), y devuelve el sentinela `__next__` por cada documento. El framework resuelve dinámicamente la siguiente etapa del workflow (en el workflow default, `q.extractor` con routing key `doc.extract`). Este es el segundo fan-out.
 
 **Diseño con SLAs agresivos:** el Aggregator puede implementar un pipeline escalonado, agrupando y enviando a extracción los documentos ya completos sin esperar a que todas las páginas estén clasificadas. Así, la extracción arranca mientras aún se clasifican otras páginas.
 
@@ -217,13 +217,13 @@ A diferencia de la clasificación (donde va la página entera), aquí se envía 
 
 **Componente:** Back Office
 
-El operador ve una tarea de extracción donde aparecen los campos ya completados (marcados como correctos) y los campos pendientes de revisión. Completa los datos faltantes, envía la corrección, y el Back Office publica el resultado hacia `q.extraction_aggregator` con el routing key `doc.extracted`.
+El operador ve una tarea de extracción donde aparecen los campos ya completados (marcados como correctos) y los campos pendientes de revisión. Completa los datos faltantes, envía la corrección, y el Back Office reinyecta el resultado consultando dinámicamente el workflow YAML mediante `source_stage` y `workflow_name` de la tarea (en el workflow default, la siguiente etapa tras `extract` es `extraction_aggregation` con routing key `doc.extracted`).
 
 ### 3.9 Etapa 6 — Consolidación y Respuesta (Fan-In Final)
 
 **Componente:** Extraction Aggregator + Consolidator
 
-El Extraction Aggregator funciona de forma idéntica al Classification Aggregator: conteo atómico en `aggregation_state` con `stage='extraction'`. Cuando todos los documentos están extraídos, publica un mensaje hacia `q.consolidator`.
+El Extraction Aggregator funciona de forma idéntica al Classification Aggregator: conteo atómico en `aggregation_state` con `stage='extraction'`. Cuando todos los documentos están extraídos, devuelve el sentinela `__next__` que el framework resuelve dinámicamente a la siguiente etapa (en el workflow default, `q.consolidator` con routing key `request.consolidate`).
 
 El Consolidator ensambla el resultado final: recopila todos los documentos extraídos de todos los ficheros del input original, construye el `result_payload` JSON y actualiza la tabla `requests` con `status='completed'` y el resultado final.
 
@@ -247,7 +247,7 @@ El sistema utiliza 6 tablas gestionadas por SQLAlchemy ORM y migradas con Alembi
 
 **`documents`** — Documentos lógicos formados por la agrupación de páginas. Campos: `id` (PK), `request_id` (FK a requests), `doc_type` (tipo documental), `page_indices` (array de integers con los índices de las páginas que forman el documento), `status` (estado de procesamiento), `extracted_data` (JSONB con los campos extraídos), `extraction_confidence` (confianza mínima entre los campos).
 
-**`backoffice_tasks`** — Tareas manuales para operadores. Campos: `id` (PK), `request_id` (FK a requests), `task_type` (classification o extraction), `reference_id` (ID de la página o documento referenciado), `status` (pending, assigned, completed, timeout), `priority` (numérica), `assigned_to` (FK a operators), `input_data` (JSONB con la información para el operador), `output_data` (JSONB con la corrección del operador), `required_skills` (array de strings con skills necesarios), `created_at`, `assigned_at`, `completed_at`.
+**`backoffice_tasks`** — Tareas manuales para operadores. Campos: `id` (PK), `request_id` (FK a requests), `task_type` (classification o extraction), `reference_id` (ID de la página o documento referenciado), `status` (pending, assigned, completed, timeout), `priority` (numérica), `assigned_to` (FK a operators), `input_data` (JSONB con la información para el operador), `output_data` (JSONB con la corrección del operador), `required_skills` (array de strings con skills necesarios), `source_stage` (etapa del workflow que derivó al backoffice, para reinyección dinámica), `workflow_name` (nombre del workflow, para resolver la siguiente etapa al reinyectar), `created_at`, `assigned_at`, `completed_at`.
 
 **`operators`** — Catálogo de operadores del Back Office. Campos: `id` (PK), `username` (unique), `display_name`, `skills` (array de strings: qué tipos de tarea sabe hacer), `is_active` (booleano de disponibilidad), `current_task_id` (FK a backoffice_tasks, la tarea que tiene asignada actualmente).
 
@@ -328,7 +328,7 @@ Cada flujo de procesamiento se define como un fichero YAML en `config/workflows/
 
 **Sección `sla`:** define el deadline en segundos desde la recepción del trabajo, el porcentaje de tiempo consumido a partir del cual se emite un warning (`warn_threshold_pct`) y el porcentaje a partir del cual se escala (`escalation_threshold_pct`).
 
-**Sección `stages`:** lista ordenada de las etapas del pipeline. Cada etapa especifica: `name` (identificador de la etapa), `component` (nombre del componente que la ejecuta), `routing_key` (routing key de RabbitMQ), `timeout_seconds` (timeout individual de la etapa), `parallel` (booleano, indica si se ejecuta en paralelo por página/documento), `confidence_threshold` (umbral de confianza para desvío a manual), `backoffice_queue` (cola del Back Office para tareas manuales) y configuración de agregación (`aggregation.type`, `aggregation.collect_by`, `aggregation.expect_count_from`).
+**Sección `stages`:** lista ordenada de las etapas del pipeline. El **orden de las etapas define el flujo**: los componentes usan sentinelas (`__next__`, `__backoffice__`) y el framework consulta esta lista para resolver dinámicamente a qué etapa enrutar. Cada etapa especifica: `name` (identificador de la etapa), `component` (nombre del componente que la ejecuta), `routing_key` (routing key de RabbitMQ para la cola del componente), `timeout_seconds` (timeout individual de la etapa), `parallel` (booleano, indica si se ejecuta en paralelo por página/documento), `confidence_threshold` (umbral de confianza para desvío a manual), `backoffice_queue` (routing key del Back Office para tareas manuales) y configuración de agregación (`aggregation.type`, `aggregation.collect_by`, `aggregation.expect_count_from`).
 
 **Sección `extraction_schemas`:** define los campos a extraer por cada tipo documental, incluyendo nombre, tipo de dato (string, decimal, date) y si es obligatorio.
 
@@ -411,7 +411,7 @@ extraction_schemas:
 
 ### 6.3 Crear un Nuevo Flujo
 
-Para crear un flujo nuevo basta con crear un nuevo fichero YAML en `config/workflows/` (por ejemplo `hipotecas.yaml`) y referenciarlo al enviar la petición con `workflow=hipotecas`. No es necesario modificar código ni reiniciar servicios si se usa carga dinámica de workflows.
+Para crear un flujo nuevo basta con crear un nuevo fichero YAML en `config/workflows/` (por ejemplo `hipotecas.yaml`) y referenciarlo al enviar la petición con `workflow=hipotecas`. Gracias al enrutamiento dinámico por sentinelas, los componentes no tienen hardcodeado a dónde emiten: consultan el workflow YAML para resolver la siguiente etapa. Esto permite reordenar etapas, saltar etapas o crear flujos completamente distintos sin modificar código. Solo es necesario que las etapas del nuevo workflow sean compatibles en datos de entrada/salida entre sí.
 
 ---
 
@@ -743,7 +743,7 @@ uvicorn src.components.api_gateway.app:app --reload --port 8000
 
 Para añadir un nuevo componente al pipeline se siguen cuatro pasos:
 
-**Paso 1 — Crear el módulo.** Crear `src/components/mi_componente/component.py` con una clase que herede de `BaseComponent`. Se debe definir `component_name`, opcionalmente un método `setup()` para inicialización y obligatoriamente `process_message()` que recibe un `PipelineMessage` y una `AsyncSession` de SQLAlchemy, y devuelve una lista de tuplas `(routing_key, PipelineMessage)` indicando a qué cola(s) publicar el resultado.
+**Paso 1 — Crear el módulo.** Crear `src/components/mi_componente/component.py` con una clase que herede de `BaseComponent`. Se debe definir `component_name`, opcionalmente un método `setup()` para inicialización y obligatoriamente `process_message()` que recibe un `PipelineMessage` y una `AsyncSession` de SQLAlchemy, y devuelve una lista de tuplas `(sentinel_o_routing_key, PipelineMessage)`. Se usan sentinelas para enrutamiento dinámico: `"__next__"` para avanzar a la siguiente etapa del workflow y `"__backoffice__"` para derivar a intervención humana.
 
 ```python
 from src.core.base_component import BaseComponent
@@ -763,7 +763,7 @@ class MiComponente(BaseComponent):
             "source_component": self.component_name,
             "payload": {**message.payload, "nuevo_dato": "valor"},
         })
-        return [("routing.key.siguiente", resultado)]
+        return [("__next__", resultado)]  # El framework resuelve la siguiente etapa del workflow
 ```
 
 **Paso 2 — Registrar en el dispatcher.** En `src/__main__.py`, añadir la entrada al diccionario `COMPONENT_REGISTRY`:
@@ -788,7 +788,7 @@ QUEUE_BINDINGS = {
 
 ### 15.4 Sustituir un Stub por una Implementación Real
 
-Los componentes de OCR, Classifier y Extractor están implementados como stubs. Para poner el sistema en producción, se sustituye la lógica del método `process_message()` por la integración con el modelo ML o servicio real, manteniendo la misma interfaz de entrada/salida (recibe `PipelineMessage`, devuelve lista de tuplas `(routing_key, PipelineMessage)`). La arquitectura no cambia.
+Los componentes de OCR, Classifier y Extractor están implementados como stubs. Para poner el sistema en producción, se sustituye la lógica del método `process_message()` por la integración con el modelo ML o servicio real, manteniendo la misma interfaz de entrada/salida (recibe `PipelineMessage`, devuelve lista de tuplas con sentinelas `("__next__", msg)` o `("__backoffice__", msg)`). La arquitectura no cambia.
 
 ### 15.5 Tests
 
@@ -886,6 +886,7 @@ document-processing-system/
 │   │   ├── models.py
 │   │   ├── rabbitmq.py
 │   │   ├── database.py
+│   │   ├── routing.py
 │   │   ├── workflow_loader.py
 │   │   ├── sla.py
 │   │   └── health.py
@@ -907,7 +908,8 @@ document-processing-system/
 │   │           └── task.html
 │   └── migrations/
 │       └── versions/
-│           └── 001_initial_schema.py
+│           ├── 001_initial_schema.py
+│           └── 002_add_workflow_routing_to_backoffice_tasks.py
 ├── tests/
 │   ├── conftest.py
 │   ├── unit/
@@ -947,10 +949,13 @@ document-processing-system/
 | **Aggregator** | Componente responsable de los puntos de sincronización (fan-in). Usa conteo atómico en PostgreSQL. |
 | **SLA** | Service Level Agreement. Tiempo máximo permitido para completar el procesamiento de un trabajo. |
 | **Deadline** | Timestamp absoluto calculado como `timestamp_entrada + SLA_seconds`. |
+| **Sentinela** | Constante especial (`__next__`, `__backoffice__`) devuelta por los componentes en lugar de routing keys concretos. El framework resuelve el sentinela consultando el workflow YAML. |
+| **Enrutamiento dinámico** | Mecanismo por el cual los componentes no hardcodean el destino de sus mensajes, sino que usan sentinelas que el framework resuelve en tiempo de ejecución a partir del workflow YAML. Permite reordenar o saltar etapas sin modificar código. |
+| **`current_stage`** | Campo del `PipelineMessage` que indica la etapa actual del workflow. Se actualiza automáticamente al resolver el sentinela `__next__`. |
 | **Stub** | Implementación provisional de un componente que devuelve datos simulados para permitir pruebas del flujo completo. |
-| **Workflow** | Definición en YAML de un flujo de procesamiento documental: etapas, umbrales, SLAs y esquemas de extracción. |
-| **PipelineMessage** | Envelope Pydantic universal que viaja por todas las colas de RabbitMQ, conteniendo request_id, payload y metadatos. |
-| **BaseComponent** | Clase abstracta que todo componente del pipeline hereda. Proporciona conexión RabbitMQ, sesión de BD, logging y lifecycle. |
+| **Workflow** | Definición en YAML de un flujo de procesamiento documental: etapas, umbrales, SLAs y esquemas de extracción. El orden de las etapas define el flujo de enrutamiento dinámico. |
+| **PipelineMessage** | Envelope Pydantic universal que viaja por todas las colas de RabbitMQ, conteniendo request_id, workflow_name, current_stage, payload y metadatos. |
+| **BaseComponent** | Clase abstracta que todo componente del pipeline hereda. Proporciona conexión RabbitMQ, sesión de BD, logging, resolución de sentinelas y lifecycle. |
 | **Back Office** | Subsistema para intervención humana cuando la confianza automática es insuficiente. |
 | **Human-in-the-Loop** | Patrón de diseño donde un operador humano interviene en el flujo automatizado para corregir o completar información. |
 | **DLQ** | Dead Letter Queue. Cola donde van los mensajes que no se pudieron procesar (errores o TTL expirado). |

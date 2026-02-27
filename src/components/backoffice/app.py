@@ -19,6 +19,7 @@ from src.core.database import create_db_engine, create_session_factory
 from src.core.models import BackofficeTask, Operator, Page, Document
 from src.core.rabbitmq import setup_rabbitmq_topology
 from src.core.schemas import PipelineMessage
+from src.core.workflow_loader import WorkflowLoader
 
 logger = structlog.get_logger()
 settings = Settings()
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI):
     app.state.exchanges = await setup_rabbitmq_topology(channel)
     app.state.rmq_channel = channel
     app.state.rmq_connection = connection
+    app.state.workflow_loader = WorkflowLoader(settings.workflows_dir)
 
     logger.info("backoffice_started")
     yield
@@ -134,6 +136,15 @@ async def submit_task(
             task.status = "completed"
             task.completed_at = datetime.now(timezone.utc)
 
+            # Resolve next stage from workflow for re-injection
+            workflow_loader: WorkflowLoader = app.state.workflow_loader
+            workflow_name = task.workflow_name or "default"
+            source_stage = task.source_stage
+            next_stage = None
+
+            if source_stage:
+                next_stage = workflow_loader.get_next_stage(workflow_name, source_stage)
+
             if task.task_type == "classification":
                 # Update the page with the operator's classification
                 final_type = doc_type or task.input_data.get("suggested_type", "unknown")
@@ -148,9 +159,15 @@ async def submit_task(
                 page.status = "classified"
                 page.updated_at = datetime.now(timezone.utc)
 
-                # Publish back to pipeline: page.classified
+                # Resolve routing key from workflow (fallback for legacy tasks)
+                routing_key = next_stage.routing_key if next_stage else "page.classified"
+                stage_name = next_stage.name if next_stage else None
+
+                # Publish back to pipeline
                 message = PipelineMessage(
                     request_id=task.request_id,
+                    workflow_name=workflow_name,
+                    current_stage=stage_name,
                     page_index=page.page_index,
                     source_component="backoffice",
                     payload={
@@ -168,7 +185,7 @@ async def submit_task(
                         content_type="application/json",
                         delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                     ),
-                    routing_key="page.classified",
+                    routing_key=routing_key,
                 )
 
             elif task.task_type == "extraction":
@@ -185,9 +202,15 @@ async def submit_task(
                 doc.status = "extracted"
                 doc.updated_at = datetime.now(timezone.utc)
 
-                # Publish back to pipeline: doc.extracted
+                # Resolve routing key from workflow (fallback for legacy tasks)
+                routing_key = next_stage.routing_key if next_stage else "doc.extracted"
+                stage_name = next_stage.name if next_stage else None
+
+                # Publish back to pipeline
                 message = PipelineMessage(
                     request_id=task.request_id,
+                    workflow_name=workflow_name,
+                    current_stage=stage_name,
                     document_id=doc.id,
                     source_component="backoffice",
                     payload={
@@ -205,7 +228,7 @@ async def submit_task(
                         content_type="application/json",
                         delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                     ),
-                    routing_key="doc.extracted",
+                    routing_key=routing_key,
                 )
 
     logger.info("task_submitted", task_id=str(task_id), task_type=task.task_type, operator=operator)

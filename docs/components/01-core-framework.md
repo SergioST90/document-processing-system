@@ -34,9 +34,11 @@ class MiComponente(BaseComponent):
         # Logica de negocio aqui
         # session ya tiene una transaccion abierta (auto-commit si no hay excepcion)
 
-        # Devolver lista de (routing_key, mensaje) para publicar al siguiente paso
+        # Devolver lista de (routing_key_o_sentinela, mensaje) para publicar al siguiente paso
+        # Usar "__next__" para enrutar a la siguiente etapa del workflow
+        # Usar "__backoffice__" para derivar al back office
         out = message.model_copy(update={"source_component": self.component_name})
-        return [("siguiente.routing.key", out)]
+        return [("__next__", out)]
 ```
 
 ### Metodos opcionales para sobreescribir
@@ -59,13 +61,16 @@ class MiComponente(BaseComponent):
         await super().teardown()  # Importante: llama al padre para cerrar conexiones
 ```
 
-### Publicar al back office
+### Derivar al back office
 
-Desde cualquier componente, se puede enviar un mensaje al exchange de back office:
+Para enviar un mensaje al back office, el componente devuelve el sentinela `"__backoffice__"` en la lista de salida. El framework resuelve la cola de backoffice configurada en el YAML de la etapa actual:
 
 ```python
-await self.publish_to_backoffice("task.classification", mensaje)
+# En process_message(), si la confianza es baja:
+return [("__backoffice__", bo_message)]
 ```
+
+El campo `backoffice_queue` de la etapa en el YAML determina a que cola se envia (ej: `task.classification`).
 
 ### Registrar el componente
 
@@ -87,6 +92,7 @@ El mensaje universal lleva estos campos:
 | `request_id` | UUID | Identificador unico de la peticion del cliente |
 | `trace_id` | UUID | ID de traza para correlacionar logs |
 | `workflow_name` | str | Nombre del flujo (ej: "default") |
+| `current_stage` | str? | Nombre de la etapa actual en el workflow (ej: "ocr", "classify") |
 | `deadline_utc` | datetime? | Deadline absoluto del SLA |
 | `page_index` | int? | Indice de pagina (en etapas page-level) |
 | `page_count` | int? | Total de paginas del request |
@@ -102,7 +108,7 @@ El mensaje universal lleva estos campos:
 
 Es una clase abstracta (ABC) que gestiona todo el ciclo de vida:
 
-1. **`__init__`**: Inicializa el logger (structlog), el engine de BD (SQLAlchemy async), la session factory, el health server HTTP y el evento de shutdown.
+1. **`__init__`**: Inicializa el logger (structlog), el engine de BD (SQLAlchemy async), la session factory, el health server HTTP, el `WorkflowLoader` (para resolucion dinamica de rutas) y el evento de shutdown.
 
 2. **`run()`**: Metodo principal. Ejecuta en secuencia:
    - Registra signal handlers para SIGTERM/SIGINT (graceful shutdown)
@@ -119,7 +125,10 @@ Es una clase abstracta (ABC) que gestiona todo el ciclo de vida:
    - Abre una sesion de BD con transaccion (`async with session.begin()`)
    - Llama a `process_message()` (logica del hijo)
    - Si `process_message` no lanza excepcion: hace commit de la transaccion
-   - Publica todos los mensajes de salida al exchange `doc.direct`
+   - **Resuelve sentinelas de enrutamiento**: para cada tupla `(routing_key, mensaje)` devuelta, llama a `resolve_routing()` del modulo `src/core/routing.py`:
+     - `"__next__"` → consulta el workflow YAML, obtiene la siguiente etapa, actualiza `current_stage` en el mensaje y publica al `routing_key` de esa etapa via exchange `doc.direct`
+     - `"__backoffice__"` → consulta el `backoffice_queue` configurado en la etapa actual del YAML y publica via exchange `doc.backoffice`
+     - Cualquier otro string → se usa directamente como routing key (compatibilidad)
    - Hace ACK del mensaje RabbitMQ (via `raw_message.process(requeue=True)`)
    - Si hay excepcion: rollback de BD + NACK con requeue
 
@@ -168,7 +177,7 @@ La funcion `setup_rabbitmq_topology()` es idempotente: se puede llamar multiples
 | `requests` | Tracking central de cada peticion | Por status, por deadline (parcial) |
 | `pages` | Una fila por pagina extraida | Por request_id, por document_id |
 | `documents` | Documentos logicos (agrupaciones de paginas) | Por request_id |
-| `backoffice_tasks` | Tareas de intervencion humana | Por (status, priority), por assigned_to (parcial) |
+| `backoffice_tasks` | Tareas de intervencion humana. Incluye `source_stage` y `workflow_name` para reinyeccion dinamica | Por (status, priority), por assigned_to (parcial) |
 | `operators` | Registro de operadores | Por username (unique) |
 | `aggregation_state` | Estado de fan-in de los aggregators | Por (request_id, stage) unique |
 
@@ -187,7 +196,15 @@ DOCPROC_CLASSIFICATION_CONFIDENCE_THRESHOLD=0.85
 
 ### Workflow Loader (`src/core/workflow_loader.py`)
 
-Carga ficheros YAML de `config/workflows/` y los parsea a modelos Pydantic (`WorkflowConfig`, `StageConfig`, `SLAConfig`). Cachea en memoria para no releer el fichero en cada peticion.
+Carga ficheros YAML de `config/workflows/` y los parsea a modelos Pydantic (`WorkflowConfig`, `StageConfig`, `SLAConfig`). Cachea en memoria para no releer el fichero en cada peticion. Proporciona metodos para la resolucion de enrutamiento dinamico:
+
+- `get_first_stage(workflow_name)` → devuelve la primera etapa del workflow (usada por el Workflow Router)
+- `get_next_stage(workflow_name, current_stage)` → devuelve la siguiente etapa o `None` si es terminal
+- `get_stage_by_component(workflow_name, component_name)` → busca la etapa por nombre de componente (fallback)
+
+### Modulo de Routing (`src/core/routing.py`)
+
+Define las constantes sentinela (`NEXT = "__next__"`, `BACKOFFICE = "__backoffice__"`) y la funcion `resolve_routing()` que traduce un sentinela a una tupla concreta `(exchange, routing_key, mensaje_actualizado)` consultando el WorkflowLoader.
 
 ### Health Server (`src/core/health.py`)
 

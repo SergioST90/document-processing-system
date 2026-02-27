@@ -2,7 +2,7 @@
 
 ## Que hace
 
-Es el primer componente del pipeline tras la recepcion. Lee los metadatos del trabajo, determina que flujo de trabajo (workflow) debe ejecutarse, carga la configuracion de ese flujo desde el YAML correspondiente, calcula el deadline del SLA y reenvía el mensaje al siguiente paso del pipeline (el Splitter).
+Es el primer componente del pipeline tras la recepcion. Lee los metadatos del trabajo, determina que flujo de trabajo (workflow) debe ejecutarse, carga la configuracion de ese flujo desde el YAML correspondiente, calcula el deadline del SLA y reenvía el mensaje a la **primera etapa definida en el workflow YAML** (que en el flujo `default` es el Splitter, pero puede variar segun el workflow).
 
 **Fichero**: `src/components/workflow_router/component.py`
 
@@ -55,10 +55,6 @@ DOCPROC_WORKFLOWS_DIR=config/workflows   # Directorio donde busca los YAML
 
 Hereda de `BaseComponent`. Consume de la cola `q.workflow_router`.
 
-### Metodo `setup()`
-
-Instancia el `WorkflowLoader` apuntando al directorio configurado en `settings.workflows_dir`. El loader cachea los YAML parseados en memoria tras la primera carga.
-
 ### Metodo `process_message()`
 
 Flujo interno paso a paso:
@@ -73,7 +69,9 @@ Flujo interno paso a paso:
    - `sla_seconds`: duracion del SLA en segundos
    - `updated_at`: timestamp actual
 
-4. **Publicacion**: Crea una copia del mensaje con el `deadline_utc` anadido y `source_component: "workflow_router"`. Lo publica con routing key `"request.split"`, que lo envia a la cola `q.splitter`.
+4. **Resolucion de primera etapa**: Llama a `self._workflow_loader.get_first_stage(workflow_name)` para obtener la primera etapa del workflow YAML. En el flujo `default` es `split` (routing key `request.split`), pero en otros flujos puede ser diferente.
+
+5. **Publicacion**: Crea una copia del mensaje con `deadline_utc`, `current_stage` (nombre de la primera etapa) y `source_component: "workflow_router"`. Lo publica con el `routing_key` de esa primera etapa.
 
 ### Mensajes de entrada y salida
 
@@ -91,11 +89,12 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida** (a `q.splitter` via routing key `request.split`):
+**Salida** (a la primera etapa del workflow, ej: `q.splitter` via routing key `request.split` en el flujo default):
 ```json
 {
   "request_id": "uuid",
   "workflow_name": "default",
+  "current_stage": "split",
   "deadline_utc": "2024-01-15T10:31:00Z",
   "source_component": "workflow_router",
   "payload": {
@@ -107,4 +106,4 @@ Flujo interno paso a paso:
 }
 ```
 
-La unica diferencia es que el mensaje de salida ya tiene `deadline_utc` establecido. A partir de aqui, todos los componentes downstream tienen visibilidad del deadline.
+Las diferencias clave son que el mensaje de salida ya tiene `deadline_utc` y `current_stage` establecidos. El campo `current_stage` indica a que etapa del workflow va dirigido el mensaje, y es utilizado por los componentes downstream para resolver el enrutamiento dinamico via `__next__`.

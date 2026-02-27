@@ -66,7 +66,7 @@ class ClassifierComponent(BaseComponent):
                     },
                 }
             )
-            return [("page.classified", out_message)]
+            return [("__next__", out_message)]
         else:
             # Low confidence: send to back office
             page.status = "classification_review"
@@ -77,6 +77,8 @@ class ClassifierComponent(BaseComponent):
                 priority=3,
                 deadline_utc=message.deadline_utc,
                 required_skills=["classification"],
+                source_stage=message.current_stage,
+                workflow_name=message.workflow_name,
                 input_data={
                     "page_index": message.page_index,
                     "ocr_text": ocr_text,
@@ -105,8 +107,7 @@ class ClassifierComponent(BaseComponent):
                     },
                 }
             )
-            await self.publish_to_backoffice("task.classification", bo_message)
-            return []  # No automatic downstream; backoffice will publish when done
+            return [("__backoffice__", bo_message)]
 
     def _stub_classify(self, ocr_text: str) -> str:
         """Simple keyword-based classification stub."""

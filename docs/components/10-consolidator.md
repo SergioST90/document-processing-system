@@ -96,7 +96,7 @@ Flujo interno paso a paso:
    - Request: `status = "completed"`
    - Request: `completed_at = datetime.now(UTC)`
 
-4. **Sin mensajes de salida**: Devuelve lista vacia. Es la etapa terminal del pipeline.
+4. **Sin mensajes de salida**: Devuelve lista vacia (`[]`). Es la etapa terminal del pipeline. Al ser terminal, el framework de enrutamiento dinamico no intenta resolver ninguna etapa siguiente.
 
 ### Mensajes de entrada y salida
 

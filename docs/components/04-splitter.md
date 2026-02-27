@@ -59,7 +59,7 @@ Flujo interno paso a paso:
 5. **Creacion de paginas y fan-out**: Para cada pagina (de 0 a N-1):
    - Crea una fila `Page` en BD con `page_index`, `status: "extracted"` y la ruta del fichero
    - Crea un `PipelineMessage` con `page_index` y `page_count` establecidos
-   - Lo anade a la lista de salida con routing key `"page.ocr"`
+   - Lo anade a la lista de salida con sentinela `"__next__"` (el framework resuelve la siguiente etapa del workflow, que en el flujo `default` es `ocr` con routing key `page.ocr`)
 
 ### Mensajes de entrada y salida
 
@@ -75,7 +75,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida** (N mensajes a `q.ocr` via routing key `page.ocr`):
+**Salida** (N mensajes a la siguiente etapa del workflow, ej: `q.ocr` via `__next__` en el flujo default):
 ```json
 {
   "request_id": "uuid",

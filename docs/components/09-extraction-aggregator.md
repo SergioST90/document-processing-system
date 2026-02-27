@@ -47,7 +47,7 @@ Flujo interno paso a paso:
 
 3. **Marca como completo**: Actualiza `is_complete = true` en `aggregation_state` para la fase de extraccion.
 
-4. **Publicacion**: Envia un mensaje al routing key `"request.consolidate"` que va a la cola `q.consolidator`.
+4. **Publicacion**: Devuelve `[("__next__", out_message)]`. El framework resuelve el sentinela `__next__` consultando el workflow YAML para obtener la siguiente etapa (por defecto `consolidate` con routing key `request.consolidate`, que va a la cola `q.consolidator`).
 
 ### Mensajes de entrada y salida
 
@@ -65,7 +65,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida** (a `q.consolidator` via routing key `request.consolidate`, 1 solo mensaje):
+**Salida** (sentinela `__next__`, resuelto por el framework a `q.consolidator` via `request.consolidate` en el workflow default, 1 solo mensaje):
 ```json
 {
   "request_id": "uuid",

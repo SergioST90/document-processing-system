@@ -77,7 +77,7 @@ class SplitterComponent(BaseComponent):
                     },
                 }
             )
-            outgoing.append(("page.ocr", page_message))
+            outgoing.append(("__next__", page_message))
 
         self.logger.info(
             "split_complete",

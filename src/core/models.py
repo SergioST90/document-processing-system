@@ -136,6 +136,8 @@ class BackofficeTask(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     assigned_to: Mapped[str | None] = mapped_column(String(100))
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_stage: Mapped[str | None] = mapped_column(String(100))
+    workflow_name: Mapped[str | None] = mapped_column(String(100))
     input_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
     output_data: Mapped[dict | None] = mapped_column(JSONB)
     deadline_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

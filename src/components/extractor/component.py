@@ -92,7 +92,7 @@ class ExtractorComponent(BaseComponent):
                     },
                 }
             )
-            return [("doc.extracted", out_message)]
+            return [("__next__", out_message)]
         else:
             doc.status = "extraction_review"
             task = BackofficeTask(
@@ -102,6 +102,8 @@ class ExtractorComponent(BaseComponent):
                 priority=3,
                 deadline_utc=message.deadline_utc,
                 required_skills=["extraction", doc_type],
+                source_stage=message.current_stage,
+                workflow_name=message.workflow_name,
                 input_data={
                     "document_id": str(doc.id),
                     "doc_type": doc_type,
@@ -131,5 +133,4 @@ class ExtractorComponent(BaseComponent):
                     },
                 }
             )
-            await self.publish_to_backoffice("task.extraction", bo_message)
-            return []
+            return [("__backoffice__", bo_message)]

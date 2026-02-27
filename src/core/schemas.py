@@ -17,6 +17,7 @@ class PipelineMessage(BaseModel):
 
     # Workflow
     workflow_name: str = "default"
+    current_stage: Optional[str] = None
     deadline_utc: Optional[datetime] = None
 
     # Page-level context (set by splitter, carried through page stages)

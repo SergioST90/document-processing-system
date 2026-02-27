@@ -59,7 +59,7 @@ Flujo interno paso a paso:
    - `ocr_confidence`: confianza del OCR
    - `status`: de `"extracted"` a `"ocr_complete"`
 
-3. **Publicacion**: Crea una copia del mensaje anadiendo el texto OCR y la confianza al payload. Lo publica con routing key `"page.classify"`.
+3. **Publicacion**: Crea una copia del mensaje anadiendo el texto OCR y la confianza al payload. Lo devuelve con sentinela `"__next__"` (el framework resuelve la siguiente etapa del workflow, que en el flujo `default` es `classify` con routing key `page.classify`).
 
 ### Mensajes de entrada y salida
 
@@ -76,7 +76,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida** (a `q.classifier` via routing key `page.classify`):
+**Salida** (a la siguiente etapa del workflow via `__next__`, ej: `q.classifier` en el flujo default):
 ```json
 {
   "request_id": "uuid",

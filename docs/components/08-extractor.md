@@ -71,7 +71,7 @@ Flujo interno paso a paso:
 
    **Camino automatico** (confianza >= umbral):
    - Actualiza `document.status` a `"extracted"`
-   - Publica al routing key `"doc.extracted"` (va a `q.extraction_aggregator`)
+   - Devuelve `[("__next__", out_message)]`. El framework resuelve el sentinela `__next__` consultando el workflow YAML para obtener la siguiente etapa (por defecto `extraction_aggregation` con routing key `doc.extracted`).
 
    **Camino manual** (confianza < umbral):
    - Actualiza `document.status` a `"extraction_review"`
@@ -80,8 +80,9 @@ Flujo interno paso a paso:
      - `reference_id`: ID del documento
      - `required_skills`: `["extraction", doc_type]` (ej: `["extraction", "invoice"]`)
      - `input_data`: contiene `document_id`, `doc_type`, `extracted_data` (parcial), `confidence` y los textos OCR de todas las paginas del documento
-   - Publica al exchange `doc.backoffice` con routing key `"task.extraction"`
-   - Devuelve lista vacia (sera el Back Office quien reinyecte al pipeline)
+     - `source_stage`: la etapa actual del workflow (ej: `"extract"`), para que el Back Office sepa desde donde reinyectar
+     - `workflow_name`: el nombre del workflow (ej: `"default"`), para resolver la siguiente etapa al reinyectar
+   - Devuelve `[("__backoffice__", bo_message)]`. El framework resuelve el sentinela `__backoffice__` consultando el `backoffice_queue` configurado en la etapa actual del YAML (por defecto `task.extraction`) y publica al exchange `doc.backoffice`.
 
 ### Mensajes de entrada y salida
 
@@ -102,7 +103,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida - camino automatico** (a `q.extraction_aggregator` via `doc.extracted`):
+**Salida - camino automatico** (sentinela `__next__`, resuelto por el framework a `q.extraction_aggregator` via `doc.extracted` en el workflow default):
 ```json
 {
   "request_id": "uuid",
@@ -121,7 +122,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida - camino manual** (a `q.backoffice.extraction` via `task.extraction`):
+**Salida - camino manual** (sentinela `__backoffice__`, resuelto por el framework a `q.backoffice.extraction` via `task.extraction` en el workflow default):
 ```json
 {
   "request_id": "uuid",

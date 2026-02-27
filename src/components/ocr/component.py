@@ -64,4 +64,4 @@ class OCRComponent(BaseComponent):
                 },
             }
         )
-        return [("page.classify", out_message)]
+        return [("__next__", out_message)]

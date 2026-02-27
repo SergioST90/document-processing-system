@@ -122,7 +122,7 @@ class ClassificationAggregatorComponent(BaseComponent):
                     },
                 }
             )
-            outgoing.append(("doc.extract", doc_message))
+            outgoing.append(("__next__", doc_message))
 
         self.logger.info(
             "classification_aggregation_complete",

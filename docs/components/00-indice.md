@@ -18,20 +18,22 @@
 - [11 - SLA Monitor](11-sla-monitor.md) - Vigilancia de deadlines y escalado
 - [12 - Back Office](12-backoffice.md) - Interfaz web para operadores humanos
 
-## Flujo completo del mensaje
+## Flujo completo del mensaje (workflow default)
 
 ```
 POST /process --> [API Gateway] --> q.workflow_router
-    --> [Workflow Router] --> q.splitter
-    --> [Splitter] --> fan-out N paginas --> q.ocr
-    --> [OCR] (x N) --> q.classifier
+    --> [Workflow Router] --> primera etapa del workflow YAML
+    --> [Splitter] --> fan-out N paginas --> __next__ (siguiente etapa del YAML)
+    --> [OCR] (x N) --> __next__
     --> [Classifier] (x N)
-        |-- confianza alta --> q.classification_aggregator
-        |-- confianza baja --> q.backoffice.classification --> [Back Office] --> q.classification_aggregator
-    --> [Classification Aggregator] (fan-in) --> fan-out M documentos --> q.extractor
+        |-- confianza alta --> __next__ (siguiente etapa del YAML)
+        |-- confianza baja --> __backoffice__ (backoffice_queue del YAML) --> [Back Office] --> siguiente etapa
+    --> [Classification Aggregator] (fan-in) --> fan-out M documentos --> __next__
     --> [Extractor] (x M)
-        |-- confianza alta --> q.extraction_aggregator
-        |-- confianza baja --> q.backoffice.extraction --> [Back Office] --> q.extraction_aggregator
-    --> [Extraction Aggregator] (fan-in) --> q.consolidator
-    --> [Consolidator] --> COMPLETADO
+        |-- confianza alta --> __next__
+        |-- confianza baja --> __backoffice__ --> [Back Office] --> siguiente etapa
+    --> [Extraction Aggregator] (fan-in) --> __next__
+    --> [Consolidator] --> COMPLETADO (etapa terminal, no hay __next__)
 ```
+
+El enrutamiento es dinamico: cada componente emite `__next__` y el framework resuelve la siguiente etapa consultando el workflow YAML. Crear un YAML diferente cambia el orden del pipeline sin tocar codigo.

@@ -15,7 +15,9 @@ from config.settings import Settings
 from src.core.database import create_db_engine, create_session_factory
 from src.core.health import HealthServer
 from src.core.rabbitmq import setup_rabbitmq_topology
+from src.core.routing import resolve_routing
 from src.core.schemas import PipelineMessage
+from src.core.workflow_loader import WorkflowLoader
 
 
 class BaseComponent(abc.ABC):
@@ -41,6 +43,7 @@ class BaseComponent(abc.ABC):
         self._db_engine = create_db_engine(settings)
         self._session_factory = create_session_factory(self._db_engine)
         self._health_server = HealthServer(port=settings.health_port)
+        self._workflow_loader = WorkflowLoader(settings.workflows_dir)
         self._shutdown_event = asyncio.Event()
 
     @property
@@ -112,15 +115,27 @@ class BaseComponent(abc.ABC):
                     outgoing = await self.process_message(message, session)
 
             # Publish all outgoing messages AFTER successful DB commit
+            published = 0
             for routing_key, out_msg in outgoing:
-                await self._publish("doc.direct", routing_key, out_msg)
+                resolved = resolve_routing(
+                    routing_key, out_msg, self._workflow_loader, self.component_name,
+                )
+                if resolved is None:
+                    self.logger.debug(
+                        "terminal_stage_no_publish",
+                        request_id=str(out_msg.request_id),
+                    )
+                    continue
+                exchange_name, actual_key, updated_msg = resolved
+                await self._publish(exchange_name, actual_key, updated_msg)
+                published += 1
 
             elapsed = (datetime.now(timezone.utc) - start).total_seconds()
             self.logger.info(
                 "message_processed",
                 request_id=str(message.request_id),
                 elapsed_s=round(elapsed, 3),
-                published_count=len(outgoing),
+                published_count=published,
             )
 
     async def _publish(self, exchange_name: str, routing_key: str, message: PipelineMessage) -> None:

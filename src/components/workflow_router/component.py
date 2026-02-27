@@ -9,15 +9,11 @@ from src.core.base_component import BaseComponent
 from src.core.models import Request
 from src.core.schemas import PipelineMessage
 from src.core.sla import calculate_deadline
-from src.core.workflow_loader import WorkflowLoader
 
 
 class WorkflowRouterComponent(BaseComponent):
 
     component_name = "workflow_router"
-
-    async def setup(self) -> None:
-        self._workflow_loader = WorkflowLoader(self.settings.workflows_dir)
 
     async def process_message(
         self,
@@ -40,18 +36,23 @@ class WorkflowRouterComponent(BaseComponent):
         request.sla_seconds = workflow.sla.deadline_seconds
         request.updated_at = datetime.now(timezone.utc)
 
+        # Resolve first stage from workflow definition
+        first_stage = self._workflow_loader.get_first_stage(message.workflow_name)
+
         self.logger.info(
             "workflow_resolved",
             request_id=str(message.request_id),
             workflow=message.workflow_name,
             sla_seconds=workflow.sla.deadline_seconds,
+            first_stage=first_stage.name,
         )
 
-        # Forward to splitter
+        # Forward to first stage of the workflow
         out_message = message.model_copy(
             update={
                 "deadline_utc": deadline,
+                "current_stage": first_stage.name,
                 "source_component": self.component_name,
             }
         )
-        return [("request.split", out_message)]
+        return [(first_stage.routing_key, out_message)]

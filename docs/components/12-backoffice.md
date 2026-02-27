@@ -102,6 +102,7 @@ Al arrancar:
 1. Configura logging estructurado
 2. Crea engine de BD y session factory
 3. Conecta a RabbitMQ y declara la topologia (necesita publicar mensajes de vuelta al pipeline)
+4. Inicializa un `WorkflowLoader` para resolver dinamicamente a que etapa reinyectar las tareas completadas
 
 ### Endpoints HTML
 
@@ -127,33 +128,45 @@ Al arrancar:
 
 **`POST /tasks/{task_id}/submit`**:
 - Marca la tarea como `completed`
+- **Resolucion dinamica de la siguiente etapa**: Lee `task.source_stage` y `task.workflow_name` (almacenados por el componente que derivo al backoffice) y usa el `WorkflowLoader` para obtener la siguiente etapa del workflow via `get_next_stage()`. Si la tarea es legacy (sin estos campos), usa fallback hardcodeado por compatibilidad.
 - Segun el `task_type`:
 
   **Clasificacion:**
   1. Lee el `doc_type` del formulario (o usa el sugerido si no se cambio)
   2. Actualiza la fila `Page`: `doc_type = tipo_corregido`, `classification_confidence = 1.0`, `status = "classified"`
-  3. Publica un `PipelineMessage` al exchange `doc.direct` con routing key `"page.classified"`
-  4. Este mensaje llega al Classification Aggregator, que incrementa su contador normalmente
+  3. Publica un `PipelineMessage` al exchange `doc.direct` con el routing key y `current_stage` resueltos dinamicamente del workflow (por defecto la siguiente etapa tras `classify` es `classification_aggregation` con routing key `page.classified`)
+  4. Este mensaje llega al aggregator correspondiente, que incrementa su contador normalmente
 
   **Extraccion:**
   1. Parsea el JSON de `extracted_data` del formulario
   2. Actualiza la fila `Document`: merge del `extracted_data` existente con las correcciones, `extraction_confidence = 1.0`, `status = "extracted"`
-  3. Publica un `PipelineMessage` al exchange `doc.direct` con routing key `"doc.extracted"`
-  4. Este mensaje llega al Extraction Aggregator, que incrementa su contador normalmente
+  3. Publica un `PipelineMessage` al exchange `doc.direct` con el routing key y `current_stage` resueltos dinamicamente del workflow (por defecto la siguiente etapa tras `extract` es `extraction_aggregation` con routing key `doc.extracted`)
+  4. Este mensaje llega al aggregator correspondiente, que incrementa su contador normalmente
 
-### Reinyeccion en el pipeline
+### Reinyeccion dinamica en el pipeline
 
-El punto clave del diseno es que el Back Office **no es un callejon sin salida**. Cuando un operador completa una tarea, el resultado se publica exactamente al mismo routing key que usaria el componente automatico si hubiera tenido confianza suficiente:
+El punto clave del diseno es que el Back Office **no es un callejon sin salida**. Cuando un operador completa una tarea, el resultado se reinyecta en el pipeline consultando el workflow YAML:
 
+1. Se lee `source_stage` y `workflow_name` de la `BackofficeTask` (estos campos fueron almacenados por el componente que derivo al backoffice, ej: el Classifier almacena `source_stage="classify"`, `workflow_name="default"`).
+2. Se llama a `WorkflowLoader.get_next_stage(workflow_name, source_stage)` para obtener la siguiente etapa.
+3. Se publica al `routing_key` de esa etapa y se establece `current_stage` en el mensaje.
+
+Ejemplo con el workflow default:
 ```
-Clasificacion manual completada --> publica a "page.classified"
-  --> llega a q.classification_aggregator (mismo destino que clasificacion automatica)
+Clasificacion manual completada
+  --> source_stage="classify", workflow_name="default"
+  --> get_next_stage("default", "classify") = etapa "classification_aggregation" (routing_key="page.classified")
+  --> publica a "page.classified" --> llega a q.classification_aggregator
 
-Extraccion manual completada --> publica a "doc.extracted"
-  --> llega a q.extraction_aggregator (mismo destino que extraccion automatica)
+Extraccion manual completada
+  --> source_stage="extract", workflow_name="default"
+  --> get_next_stage("default", "extract") = etapa "extraction_aggregation" (routing_key="doc.extracted")
+  --> publica a "doc.extracted" --> llega a q.extraction_aggregator
 ```
 
-Los aggregators no distinguen si el mensaje viene del componente automatico o del back office. Solo cuentan mensajes recibidos contra el total esperado.
+Con un workflow distinto, el destino seria la etapa que corresponda segun la definicion YAML. Los aggregators no distinguen si el mensaje viene del componente automatico o del back office. Solo cuentan mensajes recibidos contra el total esperado.
+
+Para tareas legacy (sin `source_stage`/`workflow_name`), se mantiene un fallback hardcodeado a los routing keys por defecto.
 
 ### Interfaz web
 

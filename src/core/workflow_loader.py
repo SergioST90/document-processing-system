@@ -73,6 +73,31 @@ class WorkflowLoader:
                 return stage
         raise ValueError(f"Stage '{stage_name}' not found in workflow '{workflow_name}'")
 
+    def get_first_stage(self, workflow_name: str) -> StageConfig:
+        """Return the first stage of the workflow."""
+        wf = self.load(workflow_name)
+        if not wf.stages:
+            raise ValueError(f"Workflow '{workflow_name}' has no stages")
+        return wf.stages[0]
+
+    def get_next_stage(self, workflow_name: str, current_stage_name: str) -> StageConfig | None:
+        """Return the stage that follows current_stage_name, or None if terminal."""
+        wf = self.load(workflow_name)
+        for i, stage in enumerate(wf.stages):
+            if stage.name == current_stage_name:
+                if i + 1 < len(wf.stages):
+                    return wf.stages[i + 1]
+                return None
+        raise ValueError(f"Stage '{current_stage_name}' not found in workflow '{workflow_name}'")
+
+    def get_stage_by_component(self, workflow_name: str, component_name: str) -> StageConfig:
+        """Find the stage that runs a given component (fallback for messages without current_stage)."""
+        wf = self.load(workflow_name)
+        for stage in wf.stages:
+            if stage.component == component_name:
+                return stage
+        raise ValueError(f"No stage with component '{component_name}' in workflow '{workflow_name}'")
+
     def get_extraction_schema(self, workflow_name: str, doc_type: str) -> ExtractionSchemaConfig | None:
         wf = self.load(workflow_name)
         return wf.extraction_schemas.get(doc_type)

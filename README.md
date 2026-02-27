@@ -86,7 +86,8 @@ Sistema de orquestacion distribuida para el tratamiento automatizado de document
 - **Componentes reutilizables**: cada pieza hereda de `BaseComponent`, que gestiona la conexion a RabbitMQ, la sesion de BD, el logging estructurado, los health checks y el shutdown graceful.
 - **Fan-out / Fan-in**: el Splitter genera N mensajes (uno por pagina) que se procesan en paralelo. Los Aggregators esperan a que lleguen todos los resultados usando conteo atomico en PostgreSQL.
 - **Routing por confianza**: clasificacion y extraccion redirigen a operadores humanos cuando la confianza automatica es insuficiente.
-- **Workflows declarativos**: los flujos se definen en YAML sin tocar codigo.
+- **Enrutamiento dinamico**: los componentes no tienen hardcodeado su destino. Devuelven sentinelas (`__next__`, `__backoffice__`) y el framework resuelve la siguiente etapa consultando el workflow YAML. Crear un nuevo fichero YAML es suficiente para definir un pipeline con diferente orden de etapas.
+- **Workflows declarativos**: los flujos se definen en YAML sin tocar codigo. El orden de las etapas en el YAML determina el enrutamiento real de mensajes.
 
 ---
 
@@ -165,8 +166,9 @@ document-processing-system/
 |   |   |-- schemas.py                      # PipelineMessage (envelope universal)
 |   |   |-- models.py                       # 6 tablas ORM (requests, pages, documents, ...)
 |   |   |-- rabbitmq.py                     # Topologia: 3 exchanges, 11 colas
+|   |   |-- routing.py                      # Sentinelas (__next__, __backoffice__) y resolucion dinamica
 |   |   |-- database.py                     # SQLAlchemy async engine/session
-|   |   |-- workflow_loader.py              # Carga y cache de YAML
+|   |   |-- workflow_loader.py              # Carga y cache de YAML + resolucion de etapas
 |   |   |-- sla.py                          # Utilidades de deadline
 |   |   |-- health.py                       # HTTP health/ready server
 |   |
@@ -188,6 +190,7 @@ document-processing-system/
 |   |
 |   |-- migrations/
 |       |-- versions/001_initial_schema.py  # Schema completo (6 tablas)
+|       |-- versions/002_add_workflow_routing_to_backoffice_tasks.py
 |
 |-- tests/                                  # Unit + integration tests
 |-- k8s/                                    # Manifiestos Kubernetes (Kustomize)
@@ -409,7 +412,9 @@ Se puede usar un fichero `.env` (ver `.env.example`).
 
 ## Definicion de workflows
 
-Los flujos se definen en `config/workflows/` como ficheros YAML. Ejemplo (`default.yaml`):
+Los flujos se definen en `config/workflows/` como ficheros YAML. **El orden de las etapas en el YAML determina el enrutamiento real de los mensajes**: cada componente emite al siguiente paso definido en la lista `stages`, no a un destino hardcodeado. Esto permite crear pipelines con diferente orden de etapas simplemente creando un nuevo fichero YAML.
+
+Ejemplo (`default.yaml`):
 
 ```yaml
 name: default
@@ -487,7 +492,53 @@ extraction_schemas:
       - {name: period, type: string}
 ```
 
-Para crear un flujo nuevo, basta con crear un nuevo fichero YAML y referenciarlo al enviar la peticion con `workflow=nombre_del_fichero`.
+### Enrutamiento dinamico
+
+El enrutamiento entre etapas es **completamente dinamico**. Los componentes no conocen su destino: devuelven el sentinela `"__next__"` y el framework (`BaseComponent`) resuelve la siguiente etapa consultando el workflow YAML. Para componentes con derivacion al back office, el sentinela `"__backoffice__"` resuelve la cola de backoffice configurada en la etapa.
+
+Cada mensaje lleva un campo `current_stage` que indica en que etapa del workflow se encuentra. Al resolver `__next__`, el framework:
+1. Busca la etapa actual en la lista `stages` del YAML
+2. Obtiene la siguiente etapa en la lista
+3. Actualiza `current_stage` en el mensaje y lo publica con el `routing_key` de esa siguiente etapa
+
+### Crear un flujo nuevo
+
+Para crear un flujo nuevo, basta con crear un nuevo fichero YAML en `config/workflows/` y referenciarlo al enviar la peticion con `workflow=nombre_del_fichero`.
+
+Ejemplo: un flujo simplificado sin clasificacion (`fast_extract.yaml`):
+
+```yaml
+name: fast_extract
+description: "OCR + extraccion directa, sin clasificacion"
+version: 1
+sla:
+  deadline_seconds: 30
+stages:
+  - name: split
+    component: splitter
+    routing_key: request.split
+  - name: ocr
+    component: ocr
+    routing_key: page.ocr
+    parallel: true
+  - name: extract
+    component: extractor
+    routing_key: doc.extract
+    confidence_threshold: 0.75
+    backoffice_queue: task.extraction
+  - name: extraction_aggregation
+    component: extraction_aggregator
+    routing_key: doc.extracted
+    aggregation:
+      type: fan_in
+      collect_by: request_id
+      expect_count_from: document_count
+  - name: consolidate
+    component: consolidator
+    routing_key: request.consolidate
+```
+
+**Nota**: cada workflow debe asegurar que las etapas son compatibles en datos de entrada/salida. Por ejemplo, si se omite la etapa de clasificacion, el extractor recibira mensajes sin `document_id`, lo cual requiere un componente adaptado.
 
 ---
 
@@ -525,6 +576,8 @@ PostgreSQL con 6 tablas gestionadas por SQLAlchemy ORM y migradas con Alembic.
              | status            |       | is_active         |
              | priority          |       | current_task_id   |
              | assigned_to       |       +-------------------+
+             | source_stage      |  (etapa que derivo al backoffice)
+             | workflow_name     |  (workflow para resolver reinyeccion)
              | input_data        |
              | output_data       |
              | required_skills[] |
@@ -622,7 +675,7 @@ http://localhost:8001/?operator=nombre_del_operador
 1. **Dashboard**: tabla con todas las tareas pendientes, ordenadas por prioridad y antiguedad.
 2. **Reclamar**: el operador toma una tarea. Se reserva para el y no aparece para otros.
 3. **Resolver**: ve el texto OCR, el tipo sugerido o los datos parciales, y corrige lo necesario.
-4. **Enviar**: la correccion se reinyecta en el pipeline (publica a `page.classified` o `doc.extracted`).
+4. **Enviar**: la correccion se reinyecta en el pipeline. El Back Office consulta el workflow YAML para resolver dinamicamente a que etapa publicar (la siguiente etapa despues de la que derivo al backoffice).
 
 ### API programatica
 
@@ -713,7 +766,8 @@ class MiComponente(BaseComponent):
             "source_component": self.component_name,
             "payload": {**message.payload, "nuevo_dato": "valor"},
         })
-        return [("routing.key.siguiente", resultado)]
+        # Usar "__next__" para enrutar a la siguiente etapa del workflow
+        return [("__next__", resultado)]
 ```
 
 ### 2. Registrarlo en el dispatcher

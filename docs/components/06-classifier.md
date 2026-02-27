@@ -62,7 +62,7 @@ Flujo interno paso a paso:
 
    **Camino automatico** (confianza >= umbral):
    - Actualiza `page.status` a `"classified"`
-   - Publica el mensaje al routing key `"page.classified"` (va a `q.classification_aggregator`)
+   - Devuelve el mensaje con sentinela `"__next__"` (el framework resuelve la siguiente etapa del workflow, que en el flujo `default` es `classification_aggregation` con routing key `page.classified`)
 
    **Camino manual** (confianza < umbral):
    - Actualiza `page.status` a `"classification_review"`
@@ -72,10 +72,11 @@ Flujo interno paso a paso:
      - `priority`: 3
      - `deadline_utc`: heredado del mensaje
      - `required_skills`: `["classification"]`
+     - `source_stage`: nombre de la etapa actual (para que el backoffice sepa a donde reinyectar)
+     - `workflow_name`: nombre del workflow
      - `input_data`: contiene `page_index`, `ocr_text`, `suggested_type` y `confidence`
-   - Publica al exchange `doc.backoffice` con routing key `"task.classification"`
-   - **No** publica nada al pipeline principal (devuelve lista vacia)
-   - Sera el Back Office quien, tras la correccion del operador, publique a `"page.classified"`
+   - Devuelve el mensaje con sentinela `"__backoffice__"` (el framework resuelve el `backoffice_queue` configurado en la etapa del YAML, que en el flujo `default` es `task.classification`)
+   - Sera el Back Office quien, tras la correccion del operador, consulte el workflow para resolver la siguiente etapa y reinyecte el resultado
 
 ### Mensajes de entrada y salida
 
@@ -90,7 +91,7 @@ Flujo interno paso a paso:
 }
 ```
 
-**Salida - camino automatico** (a `q.classification_aggregator` via `page.classified`):
+**Salida - camino automatico** (a la siguiente etapa via `__next__`, ej: `q.classification_aggregator` en el flujo default):
 ```json
 {
   "request_id": "uuid",
